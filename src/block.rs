@@ -1,43 +1,99 @@
-use std::time::{SystemTime, UNIX_EPOCH};
 use blake3;
 use serde::{Serialize, Deserialize};
-use crate::poh::Poh;
+use crate::transaction::ValidatedTransaction;
+use crate::poh::VerifiedPoh;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Block {
-    index: u32,
-    timestamp: u64,
-    data: String,
-    previous_hash: String,
-    hash: String,
-    nonce: u32,
-    poh_sequence: Vec<(u64, String)>,
+pub struct PendingBlock {
+    previous_hash : String,
+    transactions : Vec<ValidatedTransaction>,
+    max_transactions : usize,
+    timestamp : u64,
 }
 
-impl Block {
-    pub fn new(index: u32, data: String, previous_hash: String) -> Block {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Error getting current time")
-            .as_millis() as u64;
-        let nonce = 0; // Initial nonce
-        let hash = Self::calculate_hash(index, &previous_hash, timestamp, &data, nonce);
-        let interval = 1;
-        let poh_sequence = Poh::new(&hash, 5, timestamp, interval); // 5 hashes in the sequence
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommittedBlock {
+    index: u32,
+    timestamp: u64,
+    previous_hash: String,
+    hash: String,
+    poh_reference: (u64, String),
+    transactions: Vec<ValidatedTransaction>,
+}
 
-        println!("poh_sequence: {:?}", poh_sequence);
+impl PendingBlock {
 
-        Block {index, timestamp, data, previous_hash, hash, nonce, poh_sequence}
+    pub fn new(previous_hash: String, max_transactions: usize) -> Self {
+        PendingBlock {
+            previous_hash,
+            transactions: Vec::new(),
+            max_transactions,
+            timestamp: 0,
+        }
+    }
+        
+    pub fn finalize(self, index: u32, poh_reference: (u64, String)) -> CommittedBlock {
+        let timestamp = poh_reference.0;
+
+        let hash = CommittedBlock::calculate_hash(index, &self.previous_hash, timestamp, &self.transactions);
+
+        CommittedBlock {
+            index,
+            previous_hash: self.previous_hash,
+            transactions: self.transactions,
+            timestamp,
+            hash, 
+            poh_reference,
+        }
     }
 
-    fn calculate_hash(index: u32, previous_hash: &str, timestamp: u64, data: &str, nonce: u32) -> String {
-        let input = format!("{}{}{}{}{}", index, previous_hash, timestamp, data, nonce);
+    pub fn add_transaction(&mut self, transaction: ValidatedTransaction) {
+        if self.transactions.len() < self.max_transactions {
+            self.transactions.push(transaction);
+        } else {
+            println!("Max transactions reached for this block.");
+        }
+    }
+}
+
+
+impl CommittedBlock {
+    pub fn verify(&self, poh: &VerifiedPoh) -> bool {
+        // Verify the PoH reference
+        if !poh.verify_reference(&self.poh_reference) {
+            println!("PoH reference is invalid!");
+            return false;
+        }
+
+        // Cross-validate the timestamp with the PoH reference
+        let (tick, _) = self.poh_reference;
+        if let Some((expected_tick, _)) = poh.get_sequence().iter().find(|(t, _)| *t == tick) {
+            if *expected_tick != tick {
+                println!("Timestamp does not match PoH reference!");
+                return false;
+            }
+        }
+
+        let calculated_hash = Self::calculate_hash(self.index, &self.previous_hash, self.timestamp, &self.transactions);
+
+        println!("Calculated hash: {}", calculated_hash);
+        println!("Block hash: {}", self.hash);
+        if self.hash != calculated_hash {
+            println!("Block hash is invalid!");
+            return false;
+        }
+
+        true
+    }
+
+    fn calculate_hash(index: u32, previous_hash: &str, timestamp: u64, transaction: &[ValidatedTransaction]) -> String {
+        let transactions_data: String = transaction
+        .iter()
+        .map(|tx| format!("{}{}{}{}", tx.id, tx.sender, tx.receiver, tx.amount))
+        .collect();
+
+        let input = format!("{}{}{}{}", index, previous_hash, timestamp, transactions_data);
         let hash = blake3::hash(input.as_bytes());
         hash.to_hex().to_string()
-    }
-
-    pub fn verify(&self) -> bool {
-        let poh = Poh { poh_sequence: self.poh_sequence.clone() };
-        poh.verify_poh_sequence(&self.hash) // Pass the block's hash to the POH verification
     }
 }
