@@ -49,10 +49,26 @@ impl Transaction {
 }
 
 impl ValidatedTransaction {
-        pub fn serialize(&self) -> String {
-            format!(
-                "ValidatedTransaction(id: {}, sender: {}, receiver: {}, amount: {}, signature: {})",
-                self.id, self.sender, self.receiver, self.amount, self.signature
-            )
-        }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        assert!(!self.sender.contains('\0'), "Sender contains null byte");
+        assert!(!self.receiver.contains('\0'), "Receiver contains null byte");
+        assert!(!self.signature.contains('\0'), "Signature contains null byte");
+
+        let mut bytes: Vec<u8> = Vec::with_capacity(
+            4 +
+            self.sender.len() + 1 + 
+            self.receiver.len() + 1 + 
+            8 +
+            self.signature.len()
+        );
+
+        bytes.extend_from_slice(&self.id.to_le_bytes());
+        bytes.extend_from_slice(self.sender.as_bytes());
+        bytes.extend_from_slice(&[0u8]); // separator
+        bytes.extend_from_slice(self.receiver.as_bytes());
+        bytes.extend_from_slice(&[0u8]); // separator
+        bytes.extend_from_slice(&self.amount.to_le_bytes());
+        bytes.extend_from_slice(self.signature.as_bytes());
+        bytes
     }
+}

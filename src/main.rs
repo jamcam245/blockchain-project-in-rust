@@ -1,60 +1,81 @@
-mod block;
 mod poh;
 mod transaction;
 
-use transaction::{Transaction};
-use block::{PendingBlock};
-use poh::{UninitializedPoh};
+use poh::{Poh, Uninitialized};
+use crate::transaction::ValidatedTransaction;
+use rs_merkle::{MerkleTree, Hasher};
+use blake3;
+
+#[derive(Clone)]
+struct Blake3Hasher;
+
+impl Hasher for Blake3Hasher {
+    type Hash = [u8; 32];
+
+    fn hash(data: &[u8]) -> [u8; 32] {
+        *blake3::hash(data).as_bytes()
+    }
+}
+
+fn create_transactions(count: usize) -> Vec<ValidatedTransaction> {
+    (0..count).map(|i| {
+        let mut tx = transaction::Transaction::new(
+            i as u32,
+            format!("sender_{}", i),
+            format!("receiver_{}", i),
+            (i * 10) as f64
+        );
+        tx.sign(format!("signature_{}", i));
+        tx.validate().expect("Transaction validation failed")
+    }).collect()
+}
 
 fn main() {
-    // Create and validate a transaction
-    let mut tx = Transaction::new(
-        1,
-        "Alice".to_string(),
-        "Bob".to_string(),
-        100.0
-    );
-
-    tx.sign("valid_signature".to_string());
+    let poh = Poh::<Uninitialized>::new()
+        .initialize();
     
-    let validated_tx = match tx.validate() {
-        Ok(vtx) => vtx,
-        Err(e) => {
-            println!("Transaction validation failed: {}", e);
-            return;
-        }
-    };
+    let mut verified_poh = poh.verify_genesis()
+        .expect("PoH verification failed: Invalid genesis");
+    println!("Genesis PoH sequence verified ✓");
 
-    // Create a new Uninitialized PoH instance
-    // Initialize the PoH with a genesis hash and parameters
-    // Note: In a real-world scenario, the genesis hash would be a cryptographic hash of the previous block
-    // and the parameters would be derived from the blockchain's consensus rules.
-    // For this example, we are using a dummy genesis hash and arbitrary parameters.
-    let uninitialized_poh = UninitializedPoh::new();
+    /*
+    verified_poh.append_entry();
+    verified_poh.append_entry();
+    println!("Appended 2 new PoH entries");
+    */
 
-    let Ok(verified_poh) = uninitialized_poh
-        .initialize("genesis_hash", 10, 0, 1)
-        .and_then(|poh| poh.verify("genesis_hash")) else {
-            eprintln!("PoH failed");
-            return;
-        };    
+    let batch_size = 3;
+    let transactions = create_transactions(batch_size);
+    let hashes = verified_poh.append_entries(transactions);
+
+    println!("Appended {} new PoH entries", batch_size);
     
-
-    // Create and finalize a block with the validated transaction
-    let mut pending_block = PendingBlock::new("0".to_string(), 10);
-    pending_block.add_transaction(validated_tx);
-
-    // Get a PoH reference for the block
-    let poh_reference = verified_poh.get_sequence()[0].clone();
-    
-    // Finalize the block
-    let committed_block = pending_block.finalize(1, poh_reference);
-
-    // Verify the committed block using the verified PoH
-    if committed_block.verify(&verified_poh) {
-        println!("Block successfully created and verified!");
-        println!("Block: {:?}", committed_block);
-    } else {
-        println!("Block verification failed!");
+    println!("Generated {} hashes:", hashes.len());
+    for (i, hash) in hashes.iter().enumerate() {
+        println!("{}: {:?}", i, hash);
     }
+
+    assert!(verified_poh.verify_entries(), "Entry verification failed");
+    println!("All entries verified ✓");
+
+    let leaves: Vec<[u8; 32]> = verified_poh.entries
+        .iter()
+        .map(|e| e.poh_hash)
+        .collect();
+
+    let merkle_tree = MerkleTree::<Blake3Hasher>::from_leaves(&leaves);
+    let root = merkle_tree.root().unwrap();
+
+    for (i, entry) in verified_poh.entries.iter().enumerate() {
+        let proof = merkle_tree.proof(&[i]);
+        assert!(
+            proof.verify(root, &[i], &[entry.poh_hash], leaves.len()),
+            "Merkle verification failed for entry {}",
+            i
+        );
+        println!("Entry {} verified in Merkle tree ✓", i);
+    }
+
+    println!("Final Merkle root: {:x?}", root);
+    println!("All PoH hashes successfully stored in Merkle tree!");
 }
